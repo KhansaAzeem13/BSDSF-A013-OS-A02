@@ -1,14 +1,16 @@
-
-
 /*
- * Programming Assignment 02: ls v1.1.0
- * Feature 2 — Long Listing Format (-l)
+ * Programming Assignment 02: ls v1.2.0 (Column Display)
  *
- * This version adds support for the -l option to display
- * file details similar to the original 'ls -l' command.
+ * - Adds multi-column display (down then across) for default output.
+ * - Keeps long listing (-l) support from v1.1.0.
+ * - Dynamically adapts to terminal width using ioctl().
  *
- * System calls used:
- *  stat(), opendir(), readdir(), getpwuid(), getgrgid(), ctime()
+ * Usage:
+ *   ./bin/ls           → Column display
+ *   ./bin/ls -l        → Long listing
+ *
+ * Author: Khansa Azeem
+ * Version: v1.2.0
  */
 
 #include <stdio.h>
@@ -21,21 +23,23 @@
 #include <pwd.h>
 #include <grp.h>
 #include <time.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
 
 extern int errno;
 
 /* ---------- Function Declarations ---------- */
-void do_ls(const char *dir);            // Old short format
-void do_ls_long(const char *dir);       // New long format
-void print_permissions(mode_t mode);    // Helper for permission bits
+void do_ls(const char *dir);            // Column display
+void do_ls_long(const char *dir);       // Long listing
+void print_permissions(mode_t mode);    // Permission formatter
 
-/* ---------- main() ---------- */
+/* ---------- MAIN ---------- */
 int main(int argc, char *argv[])
 {
-    int opt;           // for getopt()
-    int long_format = 0; // flag for -l option
+    int opt;
+    int long_format = 0;
 
-    // Parse command-line arguments using getopt()
+    // Parse command line (-l optional)
     while ((opt = getopt(argc, argv, "l")) != -1)
     {
         switch (opt)
@@ -49,7 +53,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    // If no directory arguments provided, use current directory
     if (optind == argc)
     {
         if (long_format)
@@ -59,7 +62,6 @@ int main(int argc, char *argv[])
     }
     else
     {
-        // Loop through all directory arguments
         for (int i = optind; i < argc; i++)
         {
             printf("Directory listing of %s:\n", argv[i]);
@@ -74,34 +76,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-/* ---------- Basic Short Listing (v1.0.0 logic) ---------- */
-void do_ls(const char *dir)
-{
-    struct dirent *entry;
-    DIR *dp = opendir(dir);
-
-    if (dp == NULL)
-    {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
-        return;
-    }
-
-    errno = 0;
-    while ((entry = readdir(dp)) != NULL)
-    {
-        // Skip hidden files
-        if (entry->d_name[0] == '.')
-            continue;
-        printf("%s\n", entry->d_name);
-    }
-
-    if (errno != 0)
-        perror("readdir failed");
-
-    closedir(dp);
-}
-
-/* ---------- Long Listing Format (-l option) ---------- */
+/* ---------- LONG LISTING (-l) ---------- */
 void do_ls_long(const char *dir)
 {
     DIR *dp;
@@ -117,52 +92,47 @@ void do_ls_long(const char *dir)
     }
 
     errno = 0;
-
     while ((entry = readdir(dp)) != NULL)
     {
-        // Skip hidden files
         if (entry->d_name[0] == '.')
             continue;
 
-        // Build full path: dir + "/" + filename
         snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
-
-        // Retrieve file info
         if (stat(path, &info) == -1)
         {
             perror("stat failed");
             continue;
         }
 
-        // Permissions
         print_permissions(info.st_mode);
-
-        // Number of hard links
         printf(" %2ld", (long)info.st_nlink);
 
-        // Owner and Group names
         struct passwd *pw = getpwuid(info.st_uid);
         struct group *gr = getgrgid(info.st_gid);
 
-        if (pw != NULL)
+        if (pw)
             printf(" %-8s", pw->pw_name);
         else
-            printf(" %-8d", info.st_uid);
+            printf(" %-8d", (int)info.st_uid);
 
-        if (gr != NULL)
+        if (gr)
             printf(" %-8s", gr->gr_name);
         else
-            printf(" %-8d", info.st_gid);
+            printf(" %-8d", (int)info.st_gid);
 
-        // File size
         printf(" %8ld", (long)info.st_size);
 
-        // Modification time
-        char *time_str = ctime(&info.st_mtime);
-        time_str[strlen(time_str) - 1] = '\0'; // remove newline
-        printf(" %s", time_str);
+        char *t = ctime(&info.st_mtime);
+        if (t)
+        {
+            t[strcspn(t, "\n")] = '\0'; // remove newline
+            printf(" %s", t);
+        }
+        else
+        {
+            printf(" ???");
+        }
 
-        // File name
         printf(" %s\n", entry->d_name);
     }
 
@@ -172,7 +142,120 @@ void do_ls_long(const char *dir)
     closedir(dp);
 }
 
-/* ---------- Helper: Permission String ---------- */
+/* ---------- DEFAULT COLUMN DISPLAY ---------- */
+void do_ls(const char *dir)
+{
+    DIR *dp = opendir(dir);
+    if (dp == NULL)
+    {
+        fprintf(stderr, "Cannot open directory: %s\n", dir);
+        return;
+    }
+
+    /* Step 1: Read all file names */
+    size_t capacity = 64;
+    size_t count = 0;
+    char **names = malloc(capacity * sizeof(char *));
+    if (!names)
+    {
+        perror("malloc");
+        closedir(dp);
+        return;
+    }
+
+    size_t maxlen = 0;
+    struct dirent *entry;
+    errno = 0;
+
+    while ((entry = readdir(dp)) != NULL)
+    {
+        if (entry->d_name[0] == '.')
+            continue;
+
+        if (count >= capacity)
+        {
+            capacity *= 2;
+            char **tmp = realloc(names, capacity * sizeof(char *));
+            if (!tmp)
+            {
+                perror("realloc");
+                for (size_t i = 0; i < count; i++)
+                    free(names[i]);
+                free(names);
+                closedir(dp);
+                return;
+            }
+            names = tmp;
+        }
+
+        names[count] = strdup(entry->d_name);
+        if (!names[count])
+        {
+            perror("strdup");
+            for (size_t i = 0; i < count; i++)
+                free(names[i]);
+            free(names);
+            closedir(dp);
+            return;
+        }
+
+        size_t len = strlen(names[count]);
+        if (len > maxlen)
+            maxlen = len;
+
+        count++;
+    }
+
+    if (errno != 0)
+        perror("readdir failed");
+
+    closedir(dp);
+
+    if (count == 0)
+    {
+        free(names);
+        return;
+    }
+
+    /* Step 2: Determine terminal width */
+    struct winsize ws;
+    int term_width = 80; // fallback width
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        term_width = ws.ws_col;
+
+    /* Step 3: Calculate columns and rows */
+    int spacing = 2;
+    int col_width = (int)maxlen + spacing;
+    if (col_width <= 0)
+        col_width = 1;
+
+    int num_cols = term_width / col_width;
+    if (num_cols < 1)
+        num_cols = 1;
+
+    int num_rows = (count + num_cols - 1) / num_cols; // ceil division
+
+    /* Step 4: Print down then across */
+    for (int r = 0; r < num_rows; r++)
+    {
+        for (int c = 0; c < num_cols; c++)
+        {
+            int idx = c * num_rows + r;
+            if (idx < (int)count)
+            {
+                printf("%-*s", col_width, names[idx]);
+            }
+        }
+        printf("\n");
+    }
+
+    /* Step 5: Free memory */
+    for (size_t i = 0; i < count; i++)
+        free(names[i]);
+    free(names);
+}
+
+/* ---------- PERMISSION FORMATTER ---------- */
 void print_permissions(mode_t mode)
 {
     char perms[11];
@@ -190,3 +273,4 @@ void print_permissions(mode_t mode)
 
     printf("%s", perms);
 }
+
