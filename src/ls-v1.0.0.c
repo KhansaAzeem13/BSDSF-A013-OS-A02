@@ -1,10 +1,10 @@
 /*
- * Programming Assignment 02: lsv1.4.0
+ * Programming Assignment 02: lsv1.5.0
  * Features:
- *   -a  → show hidden files
- *   -l  → long listing format
- *   -R  → recursive directory listing
- * default → sorted multi-column display
+ *   -a  show hidden files
+ *   -l  long listing
+ *   -R  recursive listing
+ *   colorized output for better readability
  */
 
 #include <stdio.h>
@@ -21,11 +21,20 @@
 
 extern int errno;
 
+/* ANSI Color Codes */
+#define COLOR_RESET   "\033[0m"
+#define COLOR_DIR     "\033[34m"  // Blue
+#define COLOR_EXEC    "\033[32m"  // Green
+#define COLOR_LINK    "\033[36m"  // Cyan
+#define COLOR_ERROR   "\033[31m"  // Red
+#define COLOR_FILE    "\033[37m"  // White
+
 /* ---------- Function Prototypes ---------- */
 void do_ls(const char *dir, int show_all);
 void do_ls_long(const char *dir, int show_all);
 void do_ls_recursive(const char *dir, int depth, int show_all);
 void print_permissions(mode_t mode);
+void print_colored_name(const char *path, const char *name);
 
 /* ---------- Permission Printer ---------- */
 void print_permissions(mode_t mode)
@@ -45,12 +54,32 @@ void print_permissions(mode_t mode)
     printf("%s", perms);
 }
 
+/* ---------- Color Printer ---------- */
+void print_colored_name(const char *path, const char *name)
+{
+    struct stat st;
+    if (lstat(path, &st) == -1)
+    {
+        printf(COLOR_ERROR "%s" COLOR_RESET, name);
+        return;
+    }
+
+    if (S_ISDIR(st.st_mode))
+        printf(COLOR_DIR "%s" COLOR_RESET, name);
+    else if (S_ISLNK(st.st_mode))
+        printf(COLOR_LINK "%s" COLOR_RESET, name);
+    else if (st.st_mode & S_IXUSR)
+        printf(COLOR_EXEC "%s" COLOR_RESET, name);
+    else
+        printf(COLOR_FILE "%s" COLOR_RESET, name);
+}
+
 /* ---------- Sort Helper ---------- */
 int compare_names(const void *a, const void *b)
 {
-    const char *name1 = *(const char **)a;
-    const char *name2 = *(const char **)b;
-    return strcasecmp(name1, name2);
+    const char *n1 = *(const char **)a;
+    const char *n2 = *(const char **)b;
+    return strcasecmp(n1, n2);
 }
 
 /* ---------- Long Listing (-l) ---------- */
@@ -62,9 +91,9 @@ void do_ls_long(const char *dir, int show_all)
     char path[1024];
 
     dp = opendir(dir);
-    if (dp == NULL)
+    if (!dp)
     {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
+        fprintf(stderr, COLOR_ERROR "Cannot open directory: %s\n" COLOR_RESET, dir);
         return;
     }
 
@@ -87,7 +116,7 @@ void do_ls_long(const char *dir, int show_all)
     for (int i = 0; i < count; i++)
     {
         snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
-        if (stat(path, &statbuf) == -1)
+        if (lstat(path, &statbuf) == -1)
         {
             perror("stat");
             continue;
@@ -99,13 +128,14 @@ void do_ls_long(const char *dir, int show_all)
         strftime(timebuf, sizeof(timebuf), "%b %d %H:%M", localtime(&statbuf.st_mtime));
 
         print_permissions(statbuf.st_mode);
-        printf(" %3ld %-8s %-8s %8ld %s %s\n",
+        printf(" %3ld %-8s %-8s %8ld %s ",
                statbuf.st_nlink,
                pw ? pw->pw_name : "unknown",
                gr ? gr->gr_name : "unknown",
                statbuf.st_size,
-               timebuf,
-               names[i]);
+               timebuf);
+        print_colored_name(path, names[i]);
+        printf("\n");
         free(names[i]);
     }
     free(names);
@@ -118,13 +148,12 @@ void do_ls(const char *dir, int show_all)
     struct dirent *entry;
     struct winsize w;
     int term_width = 80;
-    int count = 0;
-    int maxlen = 0;
+    int count = 0, maxlen = 0;
 
     dp = opendir(dir);
-    if (dp == NULL)
+    if (!dp)
     {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
+        fprintf(stderr, COLOR_ERROR "Cannot open directory: %s\n" COLOR_RESET, dir);
         return;
     }
 
@@ -163,7 +192,14 @@ void do_ls(const char *dir, int show_all)
         {
             int i = c * rows + r;
             if (i < count)
-                printf("%-*s", maxlen + spacing, names[i]);
+            {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+                print_colored_name(path, names[i]);
+                int pad = maxlen - strlen(names[i]) + spacing;
+                for (int s = 0; s < pad; s++)
+                    printf(" ");
+            }
         }
         printf("\n");
     }
@@ -182,9 +218,9 @@ void do_ls_recursive(const char *dir, int depth, int show_all)
     char path[1024];
 
     dp = opendir(dir);
-    if (dp == NULL)
+    if (!dp)
     {
-        fprintf(stderr, "Cannot open directory: %s : %s\n", dir, strerror(errno));
+        fprintf(stderr, COLOR_ERROR "Cannot open directory: %s : %s\n" COLOR_RESET, dir, strerror(errno));
         return;
     }
 
@@ -197,9 +233,10 @@ void do_ls_recursive(const char *dir, int depth, int show_all)
             continue;
 
         snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
-        printf("%s\n", entry->d_name);
+        print_colored_name(path, entry->d_name);
+        printf("\n");
 
-        if (stat(path, &statbuf) == -1)
+        if (lstat(path, &statbuf) == -1)
             continue;
 
         if (S_ISDIR(statbuf.st_mode))
@@ -211,24 +248,15 @@ void do_ls_recursive(const char *dir, int depth, int show_all)
 /* ---------- main() ---------- */
 int main(int argc, char *argv[])
 {
-    int opt;
-    int long_flag = 0;
-    int recursive_flag = 0;
-    int show_all = 0;
+    int opt, long_flag = 0, recursive_flag = 0, show_all = 0;
 
     while ((opt = getopt(argc, argv, "lRa")) != -1)
     {
         switch (opt)
         {
-        case 'l':
-            long_flag = 1;
-            break;
-        case 'R':
-            recursive_flag = 1;
-            break;
-        case 'a':
-            show_all = 1;
-            break;
+        case 'l': long_flag = 1; break;
+        case 'R': recursive_flag = 1; break;
+        case 'a': show_all = 1; break;
         default:
             fprintf(stderr, "Usage: %s [-l] [-R] [-a] [dir...]\n", argv[0]);
             exit(EXIT_FAILURE);
@@ -254,7 +282,6 @@ int main(int argc, char *argv[])
                 do_ls_long(argv[i], show_all);
             else
                 do_ls(argv[i], show_all);
-
             puts("");
         }
     }
