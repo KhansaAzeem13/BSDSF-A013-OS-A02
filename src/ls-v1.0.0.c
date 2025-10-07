@@ -1,9 +1,10 @@
 /*
- * Programming Assignment 02: lsv1.3.0
- * This version adds:
+ * Programming Assignment 02: lsv1.4.0
+ * Features:
+ *   -a  → show hidden files
  *   -l  → long listing format
  *   -R  → recursive directory listing
- * default → multi-column display
+ * default → sorted multi-column display
  */
 
 #include <stdio.h>
@@ -21,9 +22,9 @@
 extern int errno;
 
 /* ---------- Function Prototypes ---------- */
-void do_ls(const char *dir);
-void do_ls_long(const char *dir);
-void do_ls_recursive(const char *dir, int depth);
+void do_ls(const char *dir, int show_all);
+void do_ls_long(const char *dir, int show_all);
+void do_ls_recursive(const char *dir, int depth, int show_all);
 void print_permissions(mode_t mode);
 
 /* ---------- Permission Printer ---------- */
@@ -44,8 +45,16 @@ void print_permissions(mode_t mode)
     printf("%s", perms);
 }
 
+/* ---------- Sort Helper ---------- */
+int compare_names(const void *a, const void *b)
+{
+    const char *name1 = *(const char **)a;
+    const char *name2 = *(const char **)b;
+    return strcasecmp(name1, name2);
+}
+
 /* ---------- Long Listing (-l) ---------- */
-void do_ls_long(const char *dir)
+void do_ls_long(const char *dir, int show_all)
 {
     DIR *dp;
     struct dirent *entry;
@@ -59,14 +68,25 @@ void do_ls_long(const char *dir)
         return;
     }
 
-    printf("\n%s:\n", dir);
+    char **names = NULL;
+    int count = 0;
+
     while ((entry = readdir(dp)) != NULL)
     {
-        if (entry->d_name[0] == '.')
+        if (!show_all && entry->d_name[0] == '.')
             continue;
+        names = realloc(names, sizeof(char *) * (count + 1));
+        names[count] = strdup(entry->d_name);
+        count++;
+    }
+    closedir(dp);
 
-        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+    qsort(names, count, sizeof(char *), compare_names);
 
+    printf("\n%s:\n", dir);
+    for (int i = 0; i < count; i++)
+    {
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
         if (stat(path, &statbuf) == -1)
         {
             perror("stat");
@@ -85,13 +105,14 @@ void do_ls_long(const char *dir)
                gr ? gr->gr_name : "unknown",
                statbuf.st_size,
                timebuf,
-               entry->d_name);
+               names[i]);
+        free(names[i]);
     }
-    closedir(dp);
+    free(names);
 }
 
 /* ---------- Column Display (default) ---------- */
-void do_ls(const char *dir)
+void do_ls(const char *dir, int show_all)
 {
     DIR *dp;
     struct dirent *entry;
@@ -114,7 +135,7 @@ void do_ls(const char *dir)
     char **names = NULL;
     while ((entry = readdir(dp)) != NULL)
     {
-        if (entry->d_name[0] == '.')
+        if (!show_all && entry->d_name[0] == '.')
             continue;
         names = realloc(names, sizeof(char *) * (count + 1));
         names[count] = strdup(entry->d_name);
@@ -127,6 +148,8 @@ void do_ls(const char *dir)
 
     if (count == 0)
         return;
+
+    qsort(names, count, sizeof(char *), compare_names);
 
     int spacing = 2;
     int cols = term_width / (maxlen + spacing);
@@ -151,7 +174,7 @@ void do_ls(const char *dir)
 }
 
 /* ---------- Recursive Listing (-R) ---------- */
-void do_ls_recursive(const char *dir, int depth)
+void do_ls_recursive(const char *dir, int depth, int show_all)
 {
     DIR *dp;
     struct dirent *entry;
@@ -168,9 +191,9 @@ void do_ls_recursive(const char *dir, int depth)
     printf("\n%s:\n", dir);
     while ((entry = readdir(dp)) != NULL)
     {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        if (!show_all && entry->d_name[0] == '.')
             continue;
-        if (entry->d_name[0] == '.')
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
         snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
@@ -180,7 +203,7 @@ void do_ls_recursive(const char *dir, int depth)
             continue;
 
         if (S_ISDIR(statbuf.st_mode))
-            do_ls_recursive(path, depth + 1);
+            do_ls_recursive(path, depth + 1, show_all);
     }
     closedir(dp);
 }
@@ -191,8 +214,9 @@ int main(int argc, char *argv[])
     int opt;
     int long_flag = 0;
     int recursive_flag = 0;
+    int show_all = 0;
 
-    while ((opt = getopt(argc, argv, "lR")) != -1)
+    while ((opt = getopt(argc, argv, "lRa")) != -1)
     {
         switch (opt)
         {
@@ -202,8 +226,11 @@ int main(int argc, char *argv[])
         case 'R':
             recursive_flag = 1;
             break;
+        case 'a':
+            show_all = 1;
+            break;
         default:
-            fprintf(stderr, "Usage: %s [-l] [-R] [dir...]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-l] [-R] [-a] [dir...]\n", argv[0]);
             exit(EXIT_FAILURE);
         }
     }
@@ -211,22 +238,22 @@ int main(int argc, char *argv[])
     if (optind == argc)
     {
         if (recursive_flag)
-            do_ls_recursive(".", 0);
+            do_ls_recursive(".", 0, show_all);
         else if (long_flag)
-            do_ls_long(".");
+            do_ls_long(".", show_all);
         else
-            do_ls(".");
+            do_ls(".", show_all);
     }
     else
     {
         for (int i = optind; i < argc; i++)
         {
             if (recursive_flag)
-                do_ls_recursive(argv[i], 0);
+                do_ls_recursive(argv[i], 0, show_all);
             else if (long_flag)
-                do_ls_long(argv[i]);
+                do_ls_long(argv[i], show_all);
             else
-                do_ls(argv[i]);
+                do_ls(argv[i], show_all);
 
             puts("");
         }
